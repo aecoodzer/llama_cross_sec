@@ -9,7 +9,7 @@ import socket
 # --- 配置 ---
 SERVER_HOST = '127.0.0.1'
 SERVER_PORT = 9999
-MODEL_PATH = "/workspace/code/modelscope/Llama-3-8B" # 请替换为你的实际路径
+MODEL_PATH = "/root/autodl-tmp/modelscope/Llama3-8B" # 请替换为你的实际路径
 CONFIG_PATH = os.path.join(MODEL_PATH, "original/params.json")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

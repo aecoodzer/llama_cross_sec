@@ -18,7 +18,7 @@ class EdgeClient:
         # 连接 Cloud
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((SERVER_HOST, SERVER_PORT))
-        self.send_lock = threading.Lock() # Socket 非线程安全，需要锁
+        self.send_lock = threading.Lock() 
         print(f"[Edge] Connected to Cloud Server.")
 
     def load_weights(self):
@@ -195,7 +195,7 @@ class EdgeClient:
         return h_out + ffn_out
 
     def run(self):
-        prompt = "The capital of China is"
+        prompt = "The capital of France is"
         print(f"\nPrompt: {prompt}")
         tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE).unsqueeze(0)
         seq_len = tokens.shape[1]
@@ -212,13 +212,16 @@ class EdgeClient:
         h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
         logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
         next_token = torch.argmax(logits, dim=-1)
+        time_to_first_token = time.time() - t0
         print(f"[Edge] Prefill Done. First token: {self.tokenizer.decode(next_token)}")
         
         # --- Phase 2: Collaborative Decoding ---
         print("[Edge] Starting Collaborative Decoding...")
         current_pos = seq_len
         
-        for _ in range(10): # 生成 10 个词
+        token_gen_times = []
+        for _ in range(30): # 生成 30 个词
+            t_token_start = time.time()
             token_tensor = torch.tensor([[next_token]], device=DEVICE)
             h = torch.nn.functional.embedding(token_tensor, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
             
@@ -244,14 +247,31 @@ class EdgeClient:
             # 4. Edge Compute Tail Layers (30, 31)
             for layer in range(CLOUD_END_LAYER, self.config.n_layers):
                 h = self.forward_layer_decode(h, layer, current_pos)
-                # pass
             
             # Output
             h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
             logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
+            print(f"[Edge] Generated token at position {current_pos} in {(time.time()-t_net_start)*1000:.2f}ms")
+            
             next_token = torch.argmax(logits, dim=-1)
+            # 计算TPOT
+            t_token_end = time.time()
+            token_duration = t_token_end - t_token_start
+            token_gen_times.append(token_duration)
+            # 打印单步耗时 (ms)
+            print(f"[Edge] Generated token at position {current_pos} in {token_duration*1000:.2f}ms")
             print(self.tokenizer.decode(next_token), end="", flush=True)
             current_pos += 1
+
+        # 4. 循环结束后计算平均 TPOT
+        if token_gen_times:
+            # 通常第一两个 token 会因为 cold start 比较慢，可以选择切片 token_gen_times[1:] 来计算更稳定的速度
+            avg_time = sum(token_gen_times[1:]) / len(token_gen_times[1:])
+            print(f"\n\n--- Performance Stats[Edge] ---")
+            print(f"Total Tokens: {len(token_gen_times)}")
+            print(f"Average TPOT: {avg_time*1000:.2f} ms/token")
+            print(f"Average Tokens/Sec: {1/avg_time:.2f} tokens/s")
+            print(f"Time to First Token: {time_to_first_token*1000:.2f} ms")
 
 if __name__ == "__main__":
     client = EdgeClient()

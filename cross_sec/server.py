@@ -94,42 +94,53 @@ class CloudServer:
         server_socket.listen(1)
         print(f"[Cloud] Listening on {SERVER_HOST}:{SERVER_PORT}")
 
-        conn, addr = server_socket.accept()
-        print(f"[Cloud] Connected by {addr}")
+        while True:
+            print("[Cloud] Waiting for a new connection...")
+            conn = None
+            try:
+                # 阻塞等待新的客户端连接
+                conn, addr = server_socket.accept()
+                print(f"[Cloud] Connected by {addr}")
+                # 为新的会话清理 KV Cache，确保每轮推理从干净状态开始。
+                self.kv_store = {}
+                # 内层循环：处理当前客户端的所有请求 (KV Cache 发送和 Hidden State 请求)
+                while True:
+                    msg_type, layer_idx, payload = recv_packet(conn)
+                    if not payload: break
 
-        try:
-            while True:
-                msg_type, layer_idx, payload = recv_packet(conn)
-                if not payload: break
-
-                if msg_type == MSG_KV_CACHE:
-                    # 收到 Prefill 阶段的 KV Cache
-                    kv_data = deserialize_tensor(payload)
-                    self.kv_store[layer_idx] = kv_data
-                    # print(f"[Cloud] Stored KV for Layer {layer_idx}")
-                
-                elif msg_type == MSG_HIDDEN_REQ:
-                    # 收到 Decode 请求 (包含 start_pos 和 hidden_state)
-                    # 协议稍微魔改一下，payload 存个 dict
-                    req_data = deserialize_tensor(payload)
-                    h = req_data['h']
-                    start_pos = req_data['start_pos']
-                    
-                    # 连续计算 Cloud 负责的所有层
-                    t0 = time.time()
-                    for layer in range(CLOUD_START_LAYER, CLOUD_END_LAYER):
-                        h = self.forward_layer(h, layer, start_pos, seq_len=1)
-                    
-                    # 返回结果
-                    res_bytes = serialize_tensor(h)
-                    send_packet(conn, MSG_HIDDEN_RES, res_bytes)
-                    # print(f"[Cloud] Processed layers {CLOUD_START_LAYER}-{CLOUD_END_LAYER} in {(time.time()-t0)*1000:.2f}ms")
-
-        except Exception as e:
-            print(f"[Cloud] Error: {e}")
-        finally:
-            conn.close()
-
+                    if msg_type == MSG_KV_CACHE:
+                        # 收到 Prefill 阶段的 KV Cache
+                        kv_data = deserialize_tensor(payload)
+                        self.kv_store[layer_idx] = kv_data
+                        # print(f"[Cloud] Stored KV for Layer {layer_idx}")
+                        
+                    elif msg_type == MSG_HIDDEN_REQ:
+                        # 收到 Decode 请求 (包含 start_pos 和 hidden_state)
+                        # 协议稍微魔改一下，payload 存个 dict
+                        req_data = deserialize_tensor(payload)
+                        h = req_data['h']
+                        start_pos = req_data['start_pos']
+                            
+                        # 连续计算 Cloud 负责的所有层
+                        t0 = time.time()
+                        for layer in range(CLOUD_START_LAYER, CLOUD_END_LAYER):
+                            h = self.forward_layer(h, layer, start_pos, seq_len=1)
+                            
+                        # 返回结果
+                        res_bytes = serialize_tensor(h)
+                        send_packet(conn, MSG_HIDDEN_RES, res_bytes)
+                        print(f"[Cloud] Processed layers {CLOUD_START_LAYER}-{CLOUD_END_LAYER} in {(time.time()-t0)*1000:.2f}ms")
+            except ConnectionResetError:
+                # 捕获客户端非正常断开连接的错误
+                print(f"[Cloud] Connection reset by peer {addr}")
+            except Exception as e:
+                # 捕获其他处理错误
+                print(f"[Cloud] Error processing request: {e}")
+            finally:
+                # 确保在异常或连接关闭时，当前连接被关闭
+                if conn:
+                    conn.close()
+                # 外层 while True 循环将继续，等待下一个 accept()
 if __name__ == "__main__":
     server = CloudServer()
     server.start()

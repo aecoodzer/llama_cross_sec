@@ -11,14 +11,17 @@
 ## QUICK START
 dependency：python 3.12/transformers/pytorch
 * tips:adjust local model directory
-***
+***shell
 cd cross_sec
 ***
+
 * cloud
 ***
 python server.py
 ***
+
 * edge
+
 ***
 python client.py
 ***

@@ -17,7 +17,7 @@ class EdgeClient:
         
         # 连接 Cloud
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((SERVER_HOST, SERVER_PORT))
+        self.sock.connect(("lhc-node-cloud", SERVER_PORT))
         self.send_lock = threading.Lock() 
         print(f"[Edge] Connected to Cloud Server.")
 

@@ -9,20 +9,21 @@
 * utils.py  通信协议和配置文件
 
 ## QUICK START
-dependency：python 3.12/transformers/pytorch
-* tips:adjust local model directory
-***shell
+##### dependency：python 3.12/transformers/pytorch
+
+##### remember adjust local model directory
+
+```shell
 cd cross_sec
-***
+```
 
 * cloud
-***
+```shell
 python server.py
-***
+```
 
 * edge
 
-***
+```shell
 python client.py
-***
-
+```

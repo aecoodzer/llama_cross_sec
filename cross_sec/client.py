@@ -445,4 +445,4 @@ if __name__ == "__main__":
     # client.run()
     # 这里设置 arrival_rate，例如 0.5, 1, 2 等
     # 设为 1000 (极大值) 可以测试纯粹的吞吐量极限（无等待）
-    client.run_benchmark(arrival_rate=1, total_requests=5)
+    client.run_benchmark(arrival_rate=0.5, total_requests=5)

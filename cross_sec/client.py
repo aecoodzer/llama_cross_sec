@@ -5,7 +5,49 @@ import time
 from transformers import AutoTokenizer
 from utils import *
 
+import random
+import queue
+
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+class InferenceRequest:
+    def __init__(self, req_id, prompt_len, output_len):
+        self.req_id = req_id
+        self.arrival_time = time.time() # 记录到达时间（进入队列的时间）
+        self.prompt_len = prompt_len
+        self.output_len = output_len
+        # 模拟随机 Input Token (为了性能测试，直接生成随机Tensor比Tokenizer更快)
+        # 词表大小假设为 32000 (Llama 标准)
+        self.input_tokens = torch.randint(0, 32000, (1, prompt_len), dtype=torch.long)
+
+class WorkloadGenerator(threading.Thread):
+    def __init__(self, request_queue, arrival_rate, max_requests):
+        super().__init__()
+        self.request_queue = request_queue
+        self.arrival_rate = arrival_rate # Lambda (requests/second)
+        self.max_requests = max_requests
+        self.stop_event = threading.Event()
+
+    def run(self):
+        print(f"[Generator] Started. Target Rate: {self.arrival_rate} req/s")
+        for i in range(self.max_requests):
+            if self.stop_event.is_set():
+                break
+            
+            # 1. 生成请求
+            req = InferenceRequest(req_id=i, prompt_len=4096, output_len=128)
+            self.request_queue.put(req)
+            print(f"[Generator] Request {i} arrived. Queue size: {self.request_queue.qsize()}")
+            
+            # 2. 泊松分布等待
+            # random.expovariate(lambda) 返回符合指数分布的时间间隔
+            # 这是泊松过程的标准模拟方法
+            if self.arrival_rate > 0:
+                sleep_time = random.expovariate(self.arrival_rate)
+                time.sleep(sleep_time)
+        
+        print("[Generator] All requests generated.")
+
 class EdgeClient:
     def __init__(self):
         print(f"[Edge] Initializing on {DEVICE}...")
@@ -17,7 +59,8 @@ class EdgeClient:
         
         # 连接 Cloud
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect(("lhc-node-cloud", SERVER_PORT))
+        # self.sock.connect(("lhc-node-cloud", SERVER_PORT))
+        self.sock.connect(("localhost", SERVER_PORT))
         self.send_lock = threading.Lock() 
         print(f"[Edge] Connected to Cloud Server.")
 
@@ -32,7 +75,7 @@ class EdgeClient:
 
     def init_rope(self):
         # ... 同 Server ...
-        max_seq_len = 4096
+        max_seq_len = 8192
         freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE).float() / self.config.head_dim))
         t = torch.arange(max_seq_len, device=DEVICE, dtype=torch.float32)
         freqs = torch.outer(t, freqs)
@@ -229,8 +272,6 @@ class EdgeClient:
             for layer in range(0, CLOUD_START_LAYER):
                 h = self.forward_layer_decode(h, layer, current_pos)
 
-            
-            
             # 2. 发送 Hidden State 给 Cloud 计算 Body Layers (2-29)
             req_payload = {'h': h, 'start_pos': current_pos} # h 应该是经过 Layer 1 后的结果
             req_bytes = serialize_tensor(req_payload)
@@ -273,6 +314,135 @@ class EdgeClient:
             print(f"Average Tokens/Sec: {1/avg_time:.2f} tokens/s")
             print(f"Time to First Token: {time_to_first_token*1000:.2f} ms")
 
+    def process_single_request(self, req):
+        """处理单个请求的完整流程 (Prefill + Decode)"""
+        print(f"\n>>> [Edge] Processing Request {req.req_id} (Waited {time.time() - req.arrival_time:.3f}s)")
+        
+        tokens = req.input_tokens.to(DEVICE)
+        seq_len = tokens.shape[1]
+        
+        # --- Phase 1: Prefill ---
+        t_start = time.time()
+        
+        h = torch.nn.functional.embedding(tokens, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
+        
+        # 逐层计算 Prefill
+        for layer in range(self.config.n_layers):
+            h = self.forward_layer_prefill(h, layer, seq_len)
+        
+        # Prefill 结束，计算第一个 token
+        h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
+        logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
+        next_token = torch.argmax(logits, dim=-1)
+        
+        ttft = time.time() - t_start # Time To First Token
+        print(f"[Edge] Req {req.req_id} Prefill Done. TTFT: {ttft*1000:.2f} ms")
+
+        # --- Phase 2: Decoding ---
+        current_pos = seq_len
+        generated_tokens = []
+        
+        t_decode_start = time.time()
+        
+        for _ in range(req.output_len):
+            token_tensor = torch.tensor([[next_token]], device=DEVICE)
+            h = torch.nn.functional.embedding(token_tensor, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
+            
+            # Local Head Layers
+            for layer in range(0, CLOUD_START_LAYER):
+                h = self.forward_layer_decode(h, layer, current_pos)
+            
+            # Remote Body Layers (RPC)
+            req_payload = {'h': h, 'start_pos': current_pos}
+            req_bytes = serialize_tensor(req_payload)
+            
+            with self.send_lock:
+                send_packet(self.sock, MSG_HIDDEN_REQ, req_bytes)
+            
+            _, _, res_bytes = recv_packet(self.sock)
+            h = deserialize_tensor(res_bytes)
+            
+            # Local Tail Layers
+            for layer in range(CLOUD_END_LAYER, self.config.n_layers):
+                h = self.forward_layer_decode(h, layer, current_pos)
+            
+            # Output Head
+            h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
+            logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
+            next_token = torch.argmax(logits, dim=-1)
+            
+            generated_tokens.append(next_token.item())
+            current_pos += 1
+
+        total_time = time.time() - req.arrival_time # 包含排队时间
+        inference_time = time.time() - t_start # 仅计算时间
+        avg_tpot = (time.time() - t_decode_start) / req.output_len
+        
+        return {
+            "req_id": req.req_id,
+            "ttft": ttft,
+            "tpot": avg_tpot,
+            "total_latency": total_time,
+            "queue_latency": t_start - req.arrival_time
+        }
+
+    def run_benchmark(self, arrival_rate=1.0, total_requests=10):
+        """主循环：启动生成器并处理队列"""
+        request_queue = queue.Queue()
+        
+        # 1. 启动负载生成器线程
+        generator = WorkloadGenerator(request_queue, arrival_rate, total_requests)
+        generator.start()
+        
+        stats = []
+        processed_count = 0
+        
+        print(f"[System] Benchmark started. Rate={arrival_rate}, Total={total_requests}")
+        
+        try:
+            while processed_count < total_requests:
+                # 阻塞等待请求，超时设置为1秒以便能响应中断
+                try:
+                    req = request_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                # 处理请求
+                result = self.process_single_request(req)
+                stats.append(result)
+                processed_count += 1
+                
+                print(f"[Result] Req {result['req_id']} Finished. "
+                      f"Queue Wait: {result['queue_latency']*1000:.1f}ms, "
+                      f"TTFT: {result['ttft']*1000:.1f}ms, "
+                      f"TPOT: {result['tpot']*1000:.1f}ms")
+                
+                # 清理显存，防止多请求累积OOM
+                # self.kv_cache.clear() # 注意：如果做多并发调度，不能简单clear，目前串行可以
+                # torch.cuda.empty_cache() 
+
+        except KeyboardInterrupt:
+            print("\n[System] Stopping benchmark...")
+            generator.stop_event.set()
+        
+        generator.join()
+        
+        # --- 打印最终统计 ---
+        print("\n" + "="*40)
+        print(f"Benchmark Summary (Rate={arrival_rate} req/s)")
+        print("="*40)
+        avg_ttft = sum(r['ttft'] for r in stats) / len(stats)
+        avg_tpot = sum(r['tpot'] for r in stats) / len(stats)
+        avg_wait = sum(r['queue_latency'] for r in stats) / len(stats)
+        
+        print(f"Average TTFT       : {avg_ttft*1000:.2f} ms")
+        print(f"Average TPOT       : {avg_tpot*1000:.2f} ms")
+        print(f"Average Queue Wait : {avg_wait*1000:.2f} ms")
+        print("="*40)
+
 if __name__ == "__main__":
     client = EdgeClient()
-    client.run()
+    # client.run()
+    # 这里设置 arrival_rate，例如 0.5, 1, 2 等
+    # 设为 1000 (极大值) 可以测试纯粹的吞吐量极限（无等待）
+    client.run_benchmark(arrival_rate=1, total_requests=5)

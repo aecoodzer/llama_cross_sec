@@ -25,7 +25,7 @@ class CloudServer:
 
     def init_rope(self):
         # RoPE 预计算
-        max_seq_len = 4096
+        max_seq_len = 8192
         freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE).float() / self.config.head_dim))
         t = torch.arange(max_seq_len, device=DEVICE, dtype=torch.float32)
         freqs = torch.outer(t, freqs)

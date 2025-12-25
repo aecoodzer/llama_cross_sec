@@ -263,7 +263,7 @@ class EdgeClient:
         current_pos = seq_len
         
         token_gen_times = []
-        for _ in range(30): # 生成 30 个词
+        for _ in range(128): # 生成 128 个词
             t_token_start = time.time()
             token_tensor = torch.tensor([[next_token]], device=DEVICE)
             h = torch.nn.functional.embedding(token_tensor, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
@@ -292,7 +292,7 @@ class EdgeClient:
             # Output
             h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
             logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
-            print(f"[Edge] Generated token at position {current_pos} in {(time.time()-t_net_start)*1000:.2f}ms")
+            # print(f"[Edge] Generated token at position {current_pos} in {(time.time()-t_net_start)*1000:.2f}ms")
             
             next_token = torch.argmax(logits, dim=-1)
             # 计算TPOT
@@ -300,7 +300,7 @@ class EdgeClient:
             token_duration = t_token_end - t_token_start
             token_gen_times.append(token_duration)
             # 打印单步耗时 (ms)
-            print(f"[Edge] Generated token at position {current_pos} in {token_duration*1000:.2f}ms")
+            # print(f"[Edge] Generated token at position {current_pos} in {token_duration*1000:.2f}ms")
             print(self.tokenizer.decode(next_token), end="", flush=True)
             current_pos += 1
 
@@ -442,7 +442,7 @@ class EdgeClient:
 
 if __name__ == "__main__":
     client = EdgeClient()
-    # client.run()
+    client.run()
     # 这里设置 arrival_rate，例如 0.5, 1, 2 等
     # 设为 1000 (极大值) 可以测试纯粹的吞吐量极限（无等待）
-    client.run_benchmark(arrival_rate=0.5, total_requests=5)
+    # client.run_benchmark(arrival_rate=0.5, total_requests=5)

@@ -26,3 +26,8 @@ python server.py
 ```shell
 python client.py
 ```
+##### 12.26 update
+- 增加了泊松分布到达的请求队列发生器
+- 测试了推理逻辑的正确性
+
+to do：并发调度的kv cache池

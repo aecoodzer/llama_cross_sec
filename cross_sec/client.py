@@ -120,7 +120,7 @@ class EdgeClient:
         xk = torch.view_as_real(torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2)) * freqs_cis_curr).flatten(3).to(torch.bfloat16)
 
         # 3. --- KV Cache 处理 (核心：存本地 或 发送云端) ---
-        # [重要优化] 使用 detach() 切断梯度计算图，使用 contiguous() 确保内存连续便于序列化
+        # 使用 detach() 切断梯度计算图，使用 contiguous() 确保内存连续便于序列化
         k_cache = xk.detach().clone().contiguous()
         v_cache = xv.detach().clone().contiguous()
         current_kv = {'k': k_cache, 'v': v_cache}
@@ -318,7 +318,10 @@ class EdgeClient:
         """处理单个请求的完整流程 (Prefill + Decode)"""
         print(f"\n>>> [Edge] Processing Request {req.req_id} (Waited {time.time() - req.arrival_time:.3f}s)")
         
-        tokens = req.input_tokens.to(DEVICE)
+        # tokens = req.input_tokens.to(DEVICE)
+        prompt = "The capital of France is"
+        tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE).unsqueeze(0)
+
         seq_len = tokens.shape[1]
         
         # --- Phase 1: Prefill ---
@@ -337,6 +340,9 @@ class EdgeClient:
         
         ttft = time.time() - t_start # Time To First Token
         print(f"[Edge] Req {req.req_id} Prefill Done. TTFT: {ttft*1000:.2f} ms")
+
+        # 打印出 First token(调试)
+        # print(f"First token: {self.tokenizer.decode(next_token)}")
 
         # --- Phase 2: Decoding ---
         current_pos = seq_len
@@ -370,6 +376,9 @@ class EdgeClient:
             h_final = rms_norm(h, self.weights["norm.weight"], self.config.norm_eps)
             logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
             next_token = torch.argmax(logits, dim=-1)
+
+            # 打印出decode结果（调试）
+            # print(self.tokenizer.decode(next_token), end="", flush=True)
             
             generated_tokens.append(next_token.item())
             current_pos += 1
@@ -442,7 +451,10 @@ class EdgeClient:
 
 if __name__ == "__main__":
     client = EdgeClient()
-    client.run()
+
+    # 原本的测试逻辑，暂时用不到
+    # client.run()
+
     # 这里设置 arrival_rate，例如 0.5, 1, 2 等
     # 设为 1000 (极大值) 可以测试纯粹的吞吐量极限（无等待）
-    # client.run_benchmark(arrival_rate=0.5, total_requests=5)
+    client.run_benchmark(arrival_rate=0.5, total_requests=5)

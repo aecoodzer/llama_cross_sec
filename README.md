@@ -1,6 +1,5 @@
 # llama_cross_sec
 
-本代码使用于科研用途。
 
 用法：cross_sec文件夹为核心代码
 

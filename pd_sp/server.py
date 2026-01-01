@@ -2,12 +2,11 @@ import socket
 import torch
 import os
 import time
-from utils import *
+from ..utils import *
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 class CloudServer:
     def __init__(self):
-        print(f"[Cloud] Initializing on {DEVICE}...")
+        print(f"[Cloud] Initializing on {DEVICE_CLOUD}...")
         self.config = LlamaConfig()
         self.load_weights()
         self.init_rope()
@@ -18,7 +17,7 @@ class CloudServer:
         # 实际部署只需加载 Layer 2-29。这里为了演示方便加载全量但只用部分。
         full_weights = torch.load(
             os.path.join(MODEL_PATH, "original/consolidated.00.pth"), 
-            map_location=DEVICE, weights_only=True
+            map_location=DEVICE_CLOUD, weights_only=True
         )
         self.weights = {k: v.to(torch.bfloat16) for k, v in full_weights.items()}
         print("[Cloud] Weights loaded.")
@@ -26,8 +25,8 @@ class CloudServer:
     def init_rope(self):
         # RoPE 预计算
         max_seq_len = 8192
-        freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE).float() / self.config.head_dim))
-        t = torch.arange(max_seq_len, device=DEVICE, dtype=torch.float32)
+        freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE_CLOUD).float() / self.config.head_dim))
+        t = torch.arange(max_seq_len, device=DEVICE_CLOUD, dtype=torch.float32)
         freqs = torch.outer(t, freqs)
         self.freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
 

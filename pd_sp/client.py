@@ -3,12 +3,11 @@ import torch
 import threading
 import time
 from transformers import AutoTokenizer
-from utils import *
+from llama_cross_sec.utils import *
+from llama_cross_sec.utils import *
 
 import random
 import queue
-
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 class InferenceRequest:
     def __init__(self, req_id, prompt_len, output_len):
@@ -48,7 +47,7 @@ class WorkloadGenerator(threading.Thread):
 
 class EdgeClient:
     def __init__(self):
-        print(f"[Edge] Initializing on {DEVICE}...")
+        print(f"[Edge] Initializing on {DEVICE_EDGE}...")
         self.config = LlamaConfig()
         self.load_weights()
         self.init_rope()
@@ -60,7 +59,7 @@ class EdgeClient:
 
         # 连接 Cloud
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect(("localhost", SERVER_PORT))
+        self.sock.connect((SERVER_HOST, SERVER_PORT))
         self.send_lock = threading.Lock() 
         print(f"[Edge] Connected to Cloud Server.")
 
@@ -68,14 +67,14 @@ class EdgeClient:
         # Edge 需要全量权重用于 Prefill 计算 (为了隐私，Edge 自己算所有层)
         full_weights = torch.load(
             os.path.join(MODEL_PATH, "original/consolidated.00.pth"), 
-            map_location=DEVICE, weights_only=True
+            map_location=DEVICE_EDGE, weights_only=True
         )
         self.weights = {k: v.to(torch.bfloat16) for k, v in full_weights.items()}
 
     def init_rope(self):
         max_seq_len = 8192
-        freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE).float() / self.config.head_dim))
-        t = torch.arange(max_seq_len, device=DEVICE, dtype=torch.float32)
+        freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE_EDGE).float() / self.config.head_dim))
+        t = torch.arange(max_seq_len, device=DEVICE_EDGE, dtype=torch.float32)
         freqs = torch.outer(t, freqs)
         self.freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
 
@@ -151,7 +150,7 @@ class EdgeClient:
 
         scores = torch.matmul(xq, keys.transpose(-2, -1)) / (self.config.head_dim ** 0.5)
         
-        mask = torch.full((seq_len, seq_len), float("-inf"), device=DEVICE)
+        mask = torch.full((seq_len, seq_len), float("-inf"), device=DEVICE_EDGE)
         mask = torch.triu(mask, diagonal=1)
         
         scores = scores + mask 
@@ -223,7 +222,7 @@ class EdgeClient:
         # [修改 5] 同步更新 run 方法中的流程
         prompt = "The capital of France is"
         print(f"\nPrompt: {prompt}")
-        tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE).unsqueeze(0)
+        tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE_EDGE).unsqueeze(0)
         seq_len = tokens.shape[1]
         
         print("[Edge] Starting Prefill (PD Separation Mode)...")
@@ -242,15 +241,16 @@ class EdgeClient:
         logits = torch.matmul(h_final[:, -1, :], self.weights["output.weight"].T)
         next_token = torch.argmax(logits, dim=-1)
         time_to_first_token = time.time() - t0
-        print(f"[Edge] Prefill Done. First token: {self.tokenizer.decode(next_token)}")
+        print(f"Prefill Done. First token: {self.tokenizer.decode(next_token)}")
+        print(f"TTFT: {time_to_first_token*1000:.2f} ms")
         
-        print("[Edge] Starting Collaborative Decoding...")
+        print("Starting Collaborative Decoding...")
         current_pos = seq_len
         
         token_gen_times = []
         for _ in range(128): 
             t_token_start = time.time()
-            token_tensor = torch.tensor([[next_token]], device=DEVICE)
+            token_tensor = torch.tensor([[next_token]], device=DEVICE_EDGE)
             h = torch.nn.functional.embedding(token_tensor, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
             
             for layer in range(0, CLOUD_START_LAYER):
@@ -264,6 +264,7 @@ class EdgeClient:
             
             _, _, res_bytes = recv_packet(self.sock)
             h = deserialize_tensor(res_bytes) 
+            h = h.to(DEVICE_EDGE)
             
             for layer in range(CLOUD_END_LAYER, self.config.n_layers):
                 h = self.forward_layer_decode(h, layer, current_pos)
@@ -289,9 +290,9 @@ class EdgeClient:
         """处理单个请求的完整流程 (Prefill + Decode)"""
         print(f"\n>>> [Edge] Processing Request {req.req_id} (Waited {time.time() - req.arrival_time:.3f}s)")
         
-        # tokens = req.input_tokens.to(DEVICE)
-        prompt = "The capital of France is"
-        tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE).unsqueeze(0)
+        tokens = req.input_tokens.to(DEVICE_EDGE)
+        # prompt = "The capital of France is"
+        # tokens = torch.tensor(self.tokenizer.encode(prompt), device=DEVICE).unsqueeze(0)
 
         seq_len = tokens.shape[1]
         
@@ -322,7 +323,7 @@ class EdgeClient:
         t_decode_start = time.time()
         
         for _ in range(req.output_len):
-            token_tensor = torch.tensor([[next_token]], device=DEVICE)
+            token_tensor = torch.tensor([[next_token]], device=DEVICE_EDGE)
             h = torch.nn.functional.embedding(token_tensor, self.weights["tok_embeddings.weight"]).to(torch.bfloat16)
             
             # Local Head Layers
@@ -332,12 +333,14 @@ class EdgeClient:
             # Remote Body Layers (RPC)
             req_payload = {'h': h, 'start_pos': current_pos}
             req_bytes = serialize_tensor(req_payload)
+            h = h.to(DEVICE_EDGE)
             
             with self.send_lock:
                 send_packet(self.sock, MSG_HIDDEN_REQ, req_bytes)
             
             _, _, res_bytes = recv_packet(self.sock)
             h = deserialize_tensor(res_bytes)
+            h = h.to(DEVICE_EDGE)
             
             # Local Tail Layers
             for layer in range(CLOUD_END_LAYER, self.config.n_layers):
@@ -418,4 +421,4 @@ class EdgeClient:
 if __name__ == "__main__":
     client = EdgeClient()
     # 设为 1000 (极大值) 可以测试纯粹的吞吐量极限（无等待）
-    client.run_benchmark(arrival_rate=1000, total_requests=5)
+    client.run_benchmark(arrival_rate=1000, total_requests=10)

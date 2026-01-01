@@ -2,9 +2,10 @@ import socket
 import torch
 import os
 import time
-from utils import *
+from ..utils import *
+from ..utils import *
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DEVICE = get_device_cloud()
 class CloudServer:
     def __init__(self):
         print(f"[Cloud] Initializing on {DEVICE}...")
@@ -25,7 +26,7 @@ class CloudServer:
 
     def init_rope(self):
         # RoPE 预计算
-        max_seq_len = 8192
+        max_seq_len = 4096
         freqs = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.head_dim, 2, device=DEVICE).float() / self.config.head_dim))
         t = torch.arange(max_seq_len, device=DEVICE, dtype=torch.float32)
         freqs = torch.outer(t, freqs)
@@ -110,14 +111,14 @@ class CloudServer:
 
                     if msg_type == MSG_KV_CACHE:
                         # 收到 Prefill 阶段的 KV Cache
-                        kv_data = deserialize_tensor(payload)
+                        kv_data = deserialize_tensor(payload, DEVICE)
                         self.kv_store[layer_idx] = kv_data
                         # print(f"[Cloud] Stored KV for Layer {layer_idx}")
                         
                     elif msg_type == MSG_HIDDEN_REQ:
                         # 收到 Decode 请求 (包含 start_pos 和 hidden_state)
                         # 协议稍微魔改一下，payload 存个 dict
-                        req_data = deserialize_tensor(payload)
+                        req_data = deserialize_tensor(payload, DEVICE)
                         h = req_data['h']
                         start_pos = req_data['start_pos']
                             

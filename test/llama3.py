@@ -3,8 +3,9 @@ import os
 import json
 import time
 from transformers import AutoTokenizer
-from llama_cross_sec.utils import *
-from llama_cross_sec.utils import *
+from utils import *
+
+DEVICE = get_device_edge()
 
 class Llama3Model:
     def __init__(self):
@@ -220,10 +221,6 @@ class Llama3Model:
             print(f"Average TPOT: {avg_time*1000:.2f} ms/token")
             print(f"Average Tokens/Sec: {1/avg_time:.2f} tokens/s")
             print(f"Time to First Token: {time_to_first_token*1000:.2f} ms")
-
-        
-
-
 
 
 if __name__ == "__main__":

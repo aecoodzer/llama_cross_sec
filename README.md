@@ -13,21 +13,28 @@
 ##### remember adjust local model directory
 
 ```shell
-cd cross_sec
+cd llama_cross_sec
 ```
 
 * cloud
 ```shell
-python server.py
+python -m cross_sec.cloud
+python -m pd_sl.cloud
 ```
 
 * edge
 
 ```shell
-python client.py
+python -m cross_sec.client
+python -m pd_sl.client
 ```
 ##### 12.26 update
 - 增加了泊松分布到达的请求队列发生器
 - 测试了推理逻辑的正确性
+
+##### 1.1 update
+- 增加了简单的内存管理
+- 实现了多线程的异步并发传输
+- 实现了多线程的并发接收
 
 to do：并发调度的kv cache池
